@@ -1,126 +1,189 @@
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Pulse Sensor</title>
-<style>
-body{margin:0;background:#0b0b0d;color:#e8e8ea;font:16px system-ui,sans-serif;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom);text-align:center}
-h1{font-size:20px;margin:14px 0 4px}
-.sub{color:#8a8a92;font-size:13px;margin:0 0 8px}
-.wrap{position:relative;margin:10px auto;width:min(100%,calc(45vh*var(--ar,1.333)));background:#000;border-radius:12px;overflow:hidden}
-video{display:block;width:100%;height:auto}
-.mirror{transform:scaleX(-1)}
-#guide{position:absolute;inset:0;pointer-events:none}
-#oval{position:absolute;left:20%;top:8%;width:60%;height:62%;border:2px solid rgba(255,255,255,.25);border-radius:50%}
-#roi{position:absolute;left:36%;width:28%;top:17%;height:14%;border:2px dashed #e5484d}
-.row{display:flex;gap:8px;justify-content:center;margin:8px 0}
-button{background:#1d1d22;color:#e8e8ea;border:1px solid #33333a;border-radius:10px;padding:10px 16px;font-size:15px}
-button.on{background:#e5484d;border-color:#e5484d;color:#fff}
-#bpm{font-size:72px;font-weight:700;line-height:1;margin:6px 0}
-#heart{display:inline-block;color:#e5484d;font-size:28px;vertical-align:middle;margin-left:6px}
-@keyframes pump{0%,100%{transform:scale(1)}15%{transform:scale(1.35)}}
-canvas{width:100%;max-width:520px;height:90px;background:#111;border-radius:8px}
-#status{min-height:2.4em;color:#b8b8c0;font-size:14px}
-.note{color:#8a8a92;font-size:12px;margin:10px 0}
-label{font-size:14px;color:#b8b8c0}
-</style></head><body>
-<h1>Pulse Sensor</h1>
-<p class="sub">Heart rate from your camera. Runs on this device only.</p>
-<div class="row"><button id="mFace" class="on">Face</button><button id="mFinger">Fingertip</button></div>
-<div class="wrap" id="wrap"><video id="v" autoplay muted playsinline></video>
-<div id="guide"><div id="oval"></div><div id="roi"></div></div></div>
-<div id="bpm">--<span id="heart">&#9829;</span></div>
-<div id="status"></div>
-<canvas id="wave" width="520" height="90"></canvas>
-<div class="row"><button id="go">Start</button><label><input type="checkbox" id="snd"> heartbeat sound</label></div>
-<p class="note" id="tip"></p>
-<p class="note">Not a medical device. Accuracy is roughly &plusmn;3&ndash;5 BPM when the signal is good. Nothing is recorded or uploaded.</p>
-<canvas id="c" width="160" height="120" style="display:none"></canvas>
-<script>
-const $=id=>document.getElementById(id), v=$('v'), cv=$('c'), cg=cv.getContext('2d',{willReadFrequently:true});
-const wave=$('wave'), wg=wave.getContext('2d');
-const FS=30, WIN=12;
-let mode='face', stream=null, running=false, samples=[], hist=[], smooth=null, lastGood=0, lastY=null, AC=null, bt=null, snd=false, lastAn=0;
-const TIPS={face:'Bright, even light on your face. Sit still and put your forehead inside the red box. Takes about 10 seconds.',
- finger:'Cover the back camera (and flash) with your fingertip, lightly. Hold still for about 10 seconds. Works best in a bright room.'};
-$('tip').textContent=TIPS.face;
-function setMode(m){ mode=m; $('mFace').classList.toggle('on',m==='face'); $('mFinger').classList.toggle('on',m==='finger');
-  $('guide').style.display=m==='face'?'block':'none'; $('tip').textContent=TIPS[m]; if(running) start(); }
-$('mFace').onclick=()=>setMode('face'); $('mFinger').onclick=()=>setMode('finger');
-$('snd').onchange=e=>{ snd=e.target.checked; };
-$('go').onclick=()=>{ if(running) stop(); else start(); };
-document.addEventListener('visibilitychange',()=>{ if(document.hidden){ samples=[]; } });
-function status(t){ $('status').textContent=t; }
-function stop(){ running=false; if(stream) stream.getTracks().forEach(t=>t.stop()); stream=null; $('go').textContent='Start'; status(''); }
-async function start(){
-  if(stream) stream.getTracks().forEach(t=>t.stop());
-  if(!AC) AC=new (window.AudioContext||window.webkitAudioContext)();
-  if(AC.state==='suspended') AC.resume();
-  status('Starting camera...');
-  try{
-    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:mode==='face'?'user':'environment',width:{ideal:640},height:{ideal:480},frameRate:{ideal:30}},audio:false});
-  }catch(e){ status('Camera unavailable ('+((e&&e.name)||'error')+': '+((e&&e.message)||'')+')'); return; }
-  v.srcObject=stream; await v.play().catch(()=>{});
-  v.classList.toggle('mirror',mode==='face');
-  v.onloadedmetadata=()=>$('wrap').style.setProperty('--ar',v.videoWidth/v.videoHeight);
-  if(v.videoWidth) $('wrap').style.setProperty('--ar',v.videoWidth/v.videoHeight);
-  if(mode==='finger'){ try{ await stream.getVideoTracks()[0].applyConstraints({advanced:[{torch:true}]}); }catch(e){} }
-  samples=[]; hist=[]; smooth=null; lastGood=0; lastY=null; running=true; $('go').textContent='Stop';
-  setHeart(null); loop();
-}
-function setHeart(b){ $('bpm').firstChild.nodeValue=b?String(Math.round(b)):'--';
-  $('heart').style.animation=b?('pump '+(60/b).toFixed(3)+'s infinite'):'none'; }
-function loop(){
-  if(!running) return;
-  if(v.videoWidth && !document.hidden){
-    cg.drawImage(v,0,0,160,120);
-    let x0=0,y0=0,w=160,h=120,ch=0;
-    if(mode==='face'){ x0=Math.round(160*.36); w=Math.round(160*.28); y0=Math.round(120*.17); h=Math.round(120*.14); ch=1; }
-    const d=cg.getImageData(x0,y0,w,h).data; let s=0;
-    for(let i=ch;i<d.length;i+=4) s+=d[i];
-    const t=performance.now()/1000;
-    samples.push({t,y:s/(d.length/4)});
-    while(samples.length>(WIN+2)*60) samples.shift();
-    if(t-lastAn>0.4){ lastAn=t; analyze(t); }
-  }
-  drawWave();
-  requestAnimationFrame(loop);
-}
-function analyze(now){
-  const n=samples.length; if(n<30) return;
-  const tEnd=samples[n-1].t, tStart=Math.max(samples[0].t,tEnd-WIN), span=tEnd-tStart;
-  if(span<6){ status('Reading... hold still ('+Math.ceil(6-span)+'s)'); return; }
-  const N=Math.floor(span*FS), x=new Float32Array(N); let j=0;
-  for(let i=0;i<N;i++){ const t=tStart+i/FS; while(j<n-2&&samples[j+1].t<t) j++;
-    const a=samples[j], b=samples[j+1], u=Math.min(1,Math.max(0,(t-a.t)/((b.t-a.t)||1))); x[i]=a.y+(b.y-a.y)*u; }
-  const P=new Float64Array(N+1); for(let i=0;i<N;i++) P[i+1]=P[i]+x[i];
-  const k=Math.round(FS*.8), y=new Float32Array(N);
-  for(let i=0;i<N;i++){ const lo=Math.max(0,i-k), hi=Math.min(N-1,i+k); y[i]=x[i]-(P[hi+1]-P[lo])/(hi-lo+1); }
-  for(let i=1;i<N-1;i++) y[i]=(y[i-1]+y[i]*2+y[i+1])/4;
-  lastY=y;
-  const pw=[], fr=[]; let sum=0, bi=0;
-  for(let f=.7;f<=3.0001;f+=.02){ let re=0, im=0;
-    for(let i=0;i<N;i++){ const w=.5-.5*Math.cos(2*Math.PI*i/(N-1)), a=2*Math.PI*f*i/FS; re+=y[i]*w*Math.cos(a); im-=y[i]*w*Math.sin(a); }
-    const p=re*re+im*im; pw.push(p); fr.push(f); sum+=p; if(p>pw[bi]) bi=pw.length-1; }
-  const q=pw[bi]/(sum/pw.length||1);
-  let f=fr[bi];
-  if(bi>0&&bi<pw.length-1){ const a=pw[bi-1], b=pw[bi], c=pw[bi+1], den=a-2*b+c; if(den) f+=.02*.5*(a-c)/den; }
-  const bpm=f*60;
-  if(q>=8){ hist.push(bpm); if(hist.length>6) hist.shift(); lastGood=now;
-    const s=[...hist].sort((a,b)=>a-b); smooth=s[Math.floor(s.length/2)]; setHeart(smooth); status('Locked. Signal quality: good'); }
-  else if(now-lastGood>6){ smooth=null; setHeart(null); status(q>=5?'Weak signal... hold very still':'Searching for pulse... check light and keep still'); }
-  else status('Signal dipped... hold still');
-  window.pulseBpm=smooth;
-}
-function drawWave(){
-  const W=wave.width, H=wave.height; wg.clearRect(0,0,W,H);
-  if(!lastY) return; const m=Math.min(lastY.length,FS*6), a=lastY.length-m; let mx=1e-6;
-  for(let i=a;i<lastY.length;i++) mx=Math.max(mx,Math.abs(lastY[i]));
-  wg.strokeStyle='#e5484d'; wg.lineWidth=2; wg.beginPath();
-  for(let i=0;i<m;i++){ const px=i/(m-1)*W, py=H/2-lastY[a+i]/mx*(H*.4); i?wg.lineTo(px,py):wg.moveTo(px,py); }
-  wg.stroke();
-}
-function tone(f,d,vol,t0){ const o=AC.createOscillator(), g=AC.createGain(), t=AC.currentTime+t0;
-  o.frequency.value=f; g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(.001,t+d); o.connect(g).connect(AC.destination); o.start(t); o.stop(t+d); }
-function sched(){ if(snd&&smooth&&AC){ tone(55,.12,.6,0); tone(48,.1,.4,.18); bt=setTimeout(sched,60000/smooth); } else bt=setTimeout(sched,400); }
-sched();
-</script></body></html>
+<!DOCTYPE html> 
+<html lang="en">
+<head>
+<meta charset="utf-8"> 
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"> 
+<title>Pulse Sensor</title> 
+<style> 
+ body{margin:0;background:#0b0b0d;color:#e8e8ea;font:16px system-ui,sans-serif;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom);text-align:center} 
+ h1{font-size:20px;margin:14px 0 4px} 
+ .sub{color:#8a8a92;font-size:13px;margin:0 0 8px} 
+ .wrap{position:relative;margin:10px auto;width:min(100%,calc(45vh*var(--ar,1.333)));background:#000;border-radius:12px;overflow:hidden} 
+ video{display:block;width:100%;height:auto} 
+ .mirror{transform:scaleX(-1)} 
+ #guide{position:absolute;inset:0;pointer-events:none} 
+ #oval{position:absolute;left:20%;top:8%;width:60%;height:62%;border:2px solid rgba(255,255,255,.25);border-radius:50%} 
+ #roi{position:absolute;left:36%;width:28%;top:17%;height:14%;border:2px dashed #e5484d} 
+ .row{display:flex;gap:8px;justify-content:center;margin:8px 0} 
+ button{background:#1d1d22;color:#e8e8ea;border:1px solid #33333a;border-radius:10px;padding:10px 16px;font-size:15px} 
+ button.on{background:#e5484d;border-color:#e5484d;color:#fff} 
+ #bpm{font-size:72px;font-weight:700;line-height:1;margin:6px 0} 
+ #heart{display:inline-block;color:#e5484d;font-size:28px;vertical-align:middle;margin-left:6px} 
+ @keyframes pump{0%,100%{transform:scale(1)}15%{transform:scale(1.35)}} 
+ canvas{width:100%;max-width:520px;height:90px;background:#111;border-radius:8px} 
+ #status{min-height:2.4em;color:#b8b8c0;font-size:14px} 
+ .note{color:#8a8a92;font-size:12px;margin:10px 0} 
+ label{font-size:14px;color:#b8b8c0} 
+</style>
+</head>
+<body> 
+ <h1>Pulse Sensor</h1> 
+ <p class="sub">Heart rate from your camera. Runs on this device only.</p> 
+ <div class="row"><button id="mFace" class="on">Face</button><button id="mFinger">Fingertip</button></div> 
+ <div class="wrap" id="wrap"><video id="v" autoplay muted playsinline></video> 
+ <div id="guide"><div id="oval"></div><div id="roi"></div></div></div> 
+ <div id="bpm">--<span id="heart">♥</span></div> 
+ <div id="status"></div> 
+ <canvas id="wave" width="520" height="90"></canvas> 
+ <div class="row"><button id="go">Start</button><label><input type="checkbox" id="snd"> heartbeat sound</label></div> 
+ <p class="note" id="tip"></p> 
+ <p class="note">Not a medical device. Accuracy is roughly &plusmn;3&ndash;5 BPM when the signal is good. Nothing is recorded or uploaded.</p> 
+ <canvas id="c" width="160" height="120" style="display:none"></canvas> 
+
+<script> 
+ const $=id=>document.getElementById(id), v=$('v'), cv=$('c'), cg=cv.getContext('2d',{willReadFrequently:true}); 
+ const wave=$('wave'), wg=wave.getContext('2d'); 
+ const FS=30, WIN=12; 
+ let mode='face', stream=null, running=false, samples=[], hist=[], smooth=null, lastGood=0, lastY=null, AC=null, bt=null, snd=false, lastAn=0; 
+ const TIPS={face:'Bright, even light on your face. Sit still and put your forehead inside the red box. Takes about 10 seconds.', 
+  finger:'Cover the back camera (and flash) with your fingertip, lightly. Hold still for about 10 seconds. Works best in a bright room.'}; 
+ $('tip').textContent=TIPS.face; 
+
+ function setMode(m){ 
+   mode=m; 
+   $('mFace').classList.toggle('on',m==='face'); 
+   $('mFinger').classList.toggle('on',m==='finger'); 
+   $('guide').style.display=m==='face'?'block':'none'; 
+   $('tip').textContent=TIPS[m]; 
+   if(running) start(); 
+ } 
+
+ $('mFace').onclick=()=>setMode('face'); 
+ $('mFinger').onclick=()=>setMode('finger'); 
+ $('snd').onchange=e=>{ snd=e.target.checked; }; 
+ $('go').onclick=()=>{ if(running) stop(); else start(); }; 
+
+ document.addEventListener('visibilitychange',()=>{ if(document.hidden){ samples=[]; } }); 
+ function status(t){ $('status').textContent=t; } 
+
+ function stop(){ 
+   running=false; 
+   if(stream) stream.getTracks().forEach(t=>t.stop()); 
+   stream=null; 
+   $('go').textContent='Start'; 
+   status(''); 
+ } 
+
+ async function start(){ 
+   if(stream) stream.getTracks().forEach(t=>t.stop()); 
+   if(!AC) AC=new (window.AudioContext||window.webkitAudioContext)(); 
+   if(AC.state==='suspended') AC.resume(); 
+   status('Starting camera...'); 
+   try{ 
+     stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:mode==='face'?'user':'environment',width:{ideal:640},height:{ideal:480},frameRate:{ideal:30}},audio:false}); 
+   }catch(e){ status('Camera unavailable ('+((e&&e.name)||'error')+': '+((e&&e.message)||'')+')'); return; } 
+   v.srcObject=stream; await v.play().catch(()=>{}); 
+   v.classList.toggle('mirror',mode==='face'); 
+   v.onloadedmetadata=()=>$('wrap').style.setProperty('--ar',v.videoWidth/v.videoHeight); 
+   if(v.videoWidth) $('wrap').style.setProperty('--ar',v.videoWidth/v.videoHeight); 
+   if(mode==='finger'){ try{ await stream.getVideoTracks()[0].applyConstraints({advanced:[{torch:true}]}); }catch(e){} } 
+   samples=[]; hist=[]; smooth=null; lastGood=0; lastY=null; running=true; $('go').textContent='Stop'; 
+   setHeart(null); loop(); 
+ } 
+
+ function setHeart(b){ 
+   $('bpm').firstChild.nodeValue=b?String(Math.round(b)):'--'; 
+   $('heart').style.animation=b?('pump '+(60/b).toFixed(3)+'s infinite'):'none'; 
+ } 
+
+ function loop(){ 
+   if(!running) return; 
+   if(v.videoWidth && !document.hidden){ 
+     cg.drawImage(v,0,0,160,120); 
+     let x0=0,y0=0,w=160,h=120,ch=0; 
+     if(mode==='face'){ x0=Math.round(160*.36); w=Math.round(160*.28); y0=Math.round(120*.17); h=Math.round(120*.14); ch=1; } 
+     const d=cg.getImageData(x0,y0,w,h).data; let s=0; 
+     for(let i=ch;i<d.length;i+=4) s+=d[i]; 
+     const t=performance.now()/1000; 
+     samples.push({t,y:s/(d.length/4)}); 
+     while(samples.length>(WIN+2)*60) samples.shift(); 
+     if(t-lastAn>0.4){ lastAn=t; analyze(t); } 
+   } 
+   drawWave(); 
+   requestAnimationFrame(loop); 
+ } 
+
+ function analyze(now){ 
+   const n=samples.length; if(n<30) return; 
+   const tEnd=samples[n-1].t, tStart=Math.max(samples[0].t,tEnd-WIN), span=tEnd-tStart; 
+   if(span<6){ status('Reading... hold still ('+Math.ceil(6-span)+'s)'); return; } 
+   const N=Math.floor(span*FS), x=new Float32Array(N); let j=0; 
+   for(let i=0;i<N;i++){ const t=tStart+i/FS; while(j<n-2&&samples[j+1].t<t) j++; const a=samples[j], b=samples[j+1], u=Math.min(1,Math.max(0,(t-a.t)/((b.t-a.t)||1))); x[i]=a.y+(b.y-a.y)*u; } 
+   const P=new Float64Array(N+1); for(let i=0;i<N;i++) P[i+1]=P[i]+x[i]; 
+   const k=Math.round(FS*.8), y=new Float32Array(N); 
+   for(let i=0;i<N;i++){ const lo=Math.max(0,i-k), hi=Math.min(N-1,i+k); y[i]=x[i]-(P[hi+1]-P[lo])/(hi-lo+1); } 
+   for(let i=1;i<N-1;i++) y[i]=(y[i-1]+y[i]*2+y[i+1])/4; 
+   lastY=y; 
+
+   // --- TIME-DOMAIN PEAK DETECTION ---
+   let peaks = []; 
+   const minPeakDist = Math.round(FS * 0.4); // Limits upper scale (~150 BPM max)
+   
+   for(let i=1; i<N-1; i++){ 
+     if(y[i] > y[i-1] && y[i] > y[i+1] && y[i] > 0){ 
+       if(peaks.length === 0 || (i - peaks[peaks.length-1]) > minPeakDist){ 
+         peaks.push(i); 
+       } 
+     } 
+   } 
+
+   if(peaks.length >= 3){ 
+     let intervals = []; 
+     for(let i=1; i<peaks.length; i++){ 
+       intervals.push((peaks[i] - peaks[i-1]) / FS); 
+     } 
+     const avgInterval = intervals.reduce((a,b)=>a+b,0) / intervals.length; 
+     const bpm = 60 / avgInterval; 
+
+     if(bpm >= 45 && bpm <= 160){ 
+       hist.push(bpm); 
+       if(hist.length > 6) hist.shift(); 
+       lastGood = now; 
+       const s = [...hist].sort((a,b)=>a-b); 
+       smooth = s[Math.floor(s.length/2)]; 
+       setHeart(smooth); 
+       status('Locked. Signal quality: good'); 
+     } else { 
+       handleWeakSignal(now); 
+     } 
+   } else { 
+     handleWeakSignal(now); 
+   } 
+   window.pulseBpm=smooth; 
+ } 
+
+ function handleWeakSignal(now){ 
+   if(now-lastGood>6){ 
+     smooth=null; 
+     setHeart(null); 
+     status('Searching for pulse... keep steady and check lighting'); 
+   } else { 
+     status('Signal dipped... hold still'); 
+   } 
+ } 
+
+ function drawWave(){ 
+   const W=wave.width, H=wave.height; wg.clearRect(0,0,W,H); 
+   if(!lastY) return; const m=Math.min(lastY.length,FS*6), a=lastY.length-m; let mx=1e-6; 
+   for(let i=a;i<lastY.length;i++) mx=Math.max(mx,Math.abs(lastY[i])); 
+   wg.strokeStyle='#e5484d'; wg.lineWidth=2; wg.beginPath(); 
+   for(let i=0;i<m;i++){ const px=i/(m-1)*W, py=H/2-lastY[a+i]/mx*(H*.4); i?wg.lineTo(px,py):wg.moveTo(px,py); } 
+   wg.stroke(); 
+ } 
+
+ function tone(f,d,vol,t0){ const o=AC.createOscillator(), g=AC.createGain(), t=AC.currentTime+t0; f.frequency?.setValueAtTime?f.frequency.setValueAtTime(f,t):o.frequency.value=f; g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(.001,t+d); o.connect(g).connect(AC.destination); o.start(t); o.stop(t+d); } 
+ function sched(){ if(snd&&smooth&&AC){ tone(55,.12,.6,0); tone(48,.1,.4,.18); bt=setTimeout(sched,60000/smooth); } else bt=setTimeout(sched,400); } 
+ sched(); 
+</script>
+</body>
+</html>
