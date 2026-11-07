@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"> 
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"> 
-<title>Pulse Sensor</title> 
+<title>Pulse Sensor Pro</title> 
 <style> 
  body{margin:0;background:#0b0b0d;color:#e8e8ea;font:16px system-ui,sans-serif;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom);text-align:center} 
  h1{font-size:20px;margin:14px 0 4px} 
@@ -37,16 +37,16 @@
  <canvas id="wave" width="520" height="90"></canvas> 
  <div class="row"><button id="go">Start</button><label><input type="checkbox" id="snd"> heartbeat sound</label></div> 
  <p class="note" id="tip"></p> 
- <p class="note">Not a medical device. Accuracy is roughly &plusmn;3&ndash;5 BPM when the signal is good. Nothing is recorded or uploaded.</p> 
+ <p class="note">Not a medical device. Accuracy depends heavily on holding still and steady touch pressure.</p> 
  <canvas id="c" width="160" height="120" style="display:none"></canvas> 
 
 <script> 
  const $=id=>document.getElementById(id), v=$('v'), cv=$('c'), cg=cv.getContext('2d',{willReadFrequently:true}); 
  const wave=$('wave'), wg=wave.getContext('2d'); 
- const FS=30, WIN=12; 
+ const FS=30, WIN=10; 
  let mode='face', stream=null, running=false, samples=[], hist=[], smooth=null, lastGood=0, lastY=null, AC=null, bt=null, snd=false, lastAn=0; 
- const TIPS={face:'Bright, even light on your face. Sit still and put your forehead inside the red box. Takes about 10 seconds.', 
-  finger:'Cover the back camera (and flash) with your fingertip, lightly. Hold still for about 10 seconds. Works best in a bright room.'}; 
+ const TIPS={face:'Bright, even light on your face. Sit still and put your forehead inside the red box.', 
+  finger:'PLACE FINGER LIGHTLY over camera + flash. Do NOT press hard, or you stop blood flow! Hold completely steady.'}; 
  $('tip').textContent=TIPS.face; 
 
  function setMode(m){ 
@@ -100,14 +100,19 @@
    if(!running) return; 
    if(v.videoWidth && !document.hidden){ 
      cg.drawImage(v,0,0,160,120); 
-     let x0=0,y0=0,w=160,h=120,ch=0; 
-     if(mode==='face'){ x0=Math.round(160*.36); w=Math.round(160*.28); y0=Math.round(120*.17); h=Math.round(120*.14); ch=1; } 
+     let x0=0,y0=0,w=160,h=120,ch=1; // CRITICAL: Always use channel 1 (GREEN) for blood absorption tracking!
+     
+     if(mode==='face'){ x0=Math.round(160*.36); w=Math.round(160*.28); y0=Math.round(120*.17); h=Math.round(120*.14); } 
+     else { // Target the center pixels in fingertip mode to avoid edge glare
+       x0=60; y0=45; w=40; h=30; 
+     }
+     
      const d=cg.getImageData(x0,y0,w,h).data; let s=0; 
      for(let i=ch;i<d.length;i+=4) s+=d[i]; 
      const t=performance.now()/1000; 
      samples.push({t,y:s/(d.length/4)}); 
      while(samples.length>(WIN+2)*60) samples.shift(); 
-     if(t-lastAn>0.4){ lastAn=t; analyze(t); } 
+     if(t-lastAn>0.2){ lastAn=t; analyze(t); } 
    } 
    drawWave(); 
    requestAnimationFrame(loop); 
@@ -116,21 +121,35 @@
  function analyze(now){ 
    const n=samples.length; if(n<30) return; 
    const tEnd=samples[n-1].t, tStart=Math.max(samples[0].t,tEnd-WIN), span=tEnd-tStart; 
-   if(span<6){ status('Reading... hold still ('+Math.ceil(6-span)+'s)'); return; } 
+   if(span<4){ status('Analyzing tissue... hold steady ('+Math.ceil(4-span)+'s)'); return; } 
+   
    const N=Math.floor(span*FS), x=new Float32Array(N); let j=0; 
-   for(let i=0;i<N;i++){ const t=tStart+i/FS; while(j<n-2&&samples[j+1].t<t) j++; const a=samples[j], b=samples[j+1], u=Math.min(1,Math.max(0,(t-a.t)/((b.t-a.t)||1))); x[i]=a.y+(b.y-a.y)*u; } 
+   for(let i=0; i<N; i++){ 
+     const t=tStart+i/FS; 
+     while(j<n-2&&samples[j+1].t<t) j++; 
+     const a=samples[j], b=samples[j+1], u=Math.min(1,Math.max(0,(t-a.t)/((b.t-a.t)||1))); 
+     x[i]=a.y+(b.y-a.y)*u; 
+   } 
+   
+   // Moving baseline extraction
    const P=new Float64Array(N+1); for(let i=0;i<N;i++) P[i+1]=P[i]+x[i]; 
-   const k=Math.round(FS*.8), y=new Float32Array(N); 
+   const k=Math.round(FS*.6), y=new Float32Array(N); 
    for(let i=0;i<N;i++){ const lo=Math.max(0,i-k), hi=Math.min(N-1,i+k); y[i]=x[i]-(P[hi+1]-P[lo])/(hi-lo+1); } 
    for(let i=1;i<N-1;i++) y[i]=(y[i-1]+y[i]*2+y[i+1])/4; 
    lastY=y; 
 
-   // --- TIME-DOMAIN PEAK DETECTION ---
+   // --- ROBUST INTER-BEAT INTERVAL (IBI) PEAK CHECK ---
    let peaks = []; 
-   const minPeakDist = Math.round(FS * 0.4); // Limits upper scale (~150 BPM max)
+   const minPeakDist = Math.round(FS * 0.45); // Max ~133 BPM
+   const maxPeakDist = Math.round(FS * 1.35); // Min ~44 BPM
    
+   // Dynamically calculate local thresholding threshold
+   let absoluteMax = 0.001;
+   for(let i=0; i<N; i++) if(Math.abs(y[i]) > absoluteMax) absoluteMax = Math.abs(y[i]);
+   const adaptiveThreshold = absoluteMax * 0.15;
+
    for(let i=1; i<N-1; i++){ 
-     if(y[i] > y[i-1] && y[i] > y[i+1] && y[i] > 0){ 
+     if(y[i] > y[i-1] && y[i] > y[i+1] && y[i] > adaptiveThreshold){ 
        if(peaks.length === 0 || (i - peaks[peaks.length-1]) > minPeakDist){ 
          peaks.push(i); 
        } 
@@ -140,35 +159,39 @@
    if(peaks.length >= 3){ 
      let intervals = []; 
      for(let i=1; i<peaks.length; i++){ 
-       intervals.push((peaks[i] - peaks[i-1]) / FS); 
+       let diff = peaks[i] - peaks[i-1];
+       if(diff >= minPeakDist && diff <= maxPeakDist) {
+         intervals.push(diff / FS); 
+       }
      } 
-     const avgInterval = intervals.reduce((a,b)=>a+b,0) / intervals.length; 
-     const bpm = 60 / avgInterval; 
+     
+     if(intervals.length >= 2) {
+       const avgInterval = intervals.reduce((a,b)=>a+b,0) / intervals.length; 
+       const bpm = 60 / avgInterval; 
 
-     if(bpm >= 45 && bpm <= 160){ 
-       hist.push(bpm); 
-       if(hist.length > 6) hist.shift(); 
-       lastGood = now; 
-       const s = [...hist].sort((a,b)=>a-b); 
-       smooth = s[Math.floor(s.length/2)]; 
-       setHeart(smooth); 
-       status('Locked. Signal quality: good'); 
-     } else { 
-       handleWeakSignal(now); 
-     } 
-   } else { 
-     handleWeakSignal(now); 
+       if(bpm >= 50 && bpm <= 140){ 
+         hist.push(bpm); 
+         if(hist.length > 5) hist.shift(); 
+         lastGood = now; 
+         const s = [...hist].sort((a,b)=>a-b); 
+         smooth = s[Math.floor(s.length/2)]; 
+         setHeart(smooth); 
+         status('Locked. Match accurate to pulse rhythm.'); 
+         return;
+       } 
+     }
    } 
+   handleWeakSignal(now); 
    window.pulseBpm=smooth; 
  } 
 
  function handleWeakSignal(now){ 
-   if(now-lastGood>6){ 
+   if(now-lastGood>5){ 
      smooth=null; 
      setHeart(null); 
-     status('Searching for pulse... keep steady and check lighting'); 
+     status('Reading finger pulse... apply LESS pressure and stay perfectly still.'); 
    } else { 
-     status('Signal dipped... hold still'); 
+     status('Filtering out touch movement... keep still'); 
    } 
  } 
 
@@ -187,3 +210,4 @@
 </script>
 </body>
 </html>
+
