@@ -1,0 +1,73 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Superhorror Test</title>
+<style>
+html,body{margin:0;height:100%;background:#000;color:#bbb;font-family:monospace;overflow:hidden}
+#stage{position:relative;width:100%;height:100%}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);filter:grayscale(.8) contrast(1.2) brightness(.7)}
+canvas{position:absolute;inset:0;width:100%;height:100%}
+#msg{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;background:#000;padding:30px;z-index:5}
+button{background:#300;color:#fcc;border:1px solid #800;padding:12px 28px;font-size:18px;cursor:pointer;margin-top:20px}
+#dbg{position:absolute;left:8px;top:8px;font-size:12px;color:#6f6;display:none;z-index:4;white-space:pre}
+</style></head><body><div id="stage">
+<video id="v" autoplay muted playsinline></video><canvas id="c"></canvas><div id="dbg"></div>
+<div id="msg"><h2>SUPERHORROR TEST</h2>
+<p>Content warning: uses your camera and microphone, loud sounds, and low light.<br>
+Everything is processed in memory on this machine. Nothing is recorded or uploaded.</p>
+<p>Listen. The sounds tell you what to do.<br>Press D (or double-tap) to show debug values.</p>
+<p id="err" style="color:#f66"></p><button id="go">BEGIN</button></div></div>
+<script>
+const $=id=>document.getElementById(id), v=$('v'), c=$('c'), g=c.getContext('2d'), dbg=$('dbg');
+let AC, an, buf, mic=0, motion=0, arousal=0, dist=5, cue=null, cueEnd=0, nextCue=0, caught=false, noiseFloor=.02, baseMotion=1, calT=0, calN=0;
+const small=document.createElement('canvas'); small.width=64; small.height=48; const sg=small.getContext('2d',{willReadFrequently:true}); let prev=null;
+const togDbg=()=>dbg.style.display=dbg.style.display==='block'?'none':'block'; let lastTap=0;
+addEventListener('keydown',e=>{if(e.key==='d'||e.key==='D')togDbg(); if((e.key==='r'||e.key==='R')&&caught)location.reload()});
+addEventListener('click',()=>{ if(caught){location.reload();return} const n=Date.now(); if(n-lastTap<400)togDbg(); lastTap=n });
+let tried=false;
+$('go').onclick=async()=>{
+  let stream;
+  if(!tried){
+    try{ stream=await navigator.mediaDevices.getUserMedia({video:true,audio:true}); }
+    catch(e){ tried=true; $('err').textContent='Sensors unavailable ('+((e&&e.name)||'error')+': '+((e&&e.message)||'')+'). Tap again to continue without them.'; $('go').textContent='CONTINUE WITHOUT SENSORS'; return; }
+  }
+  AC=new (window.AudioContext||webkitAudioContext)();
+  if(stream){ v.srcObject=stream; const s=AC.createMediaStreamSource(stream); an=AC.createAnalyser(); an.fftSize=512; s.connect(an); buf=new Float32Array(an.fftSize); }
+  $('msg').style.display='none'; calT=performance.now(); nextCue=calT+9000; beat(); requestAnimationFrame(loop);
+};
+function tone(f,d,type='sine',vol=.3,t0=0){const o=AC.createOscillator(),gn=AC.createGain();o.type=type;o.frequency.value=f;
+  const t=AC.currentTime+t0;gn.gain.setValueAtTime(vol,t);gn.gain.exponentialRampToValueAtTime(.001,t+d);o.connect(gn).connect(AC.destination);o.start(t);o.stop(t+d)}
+function tap(){tone(900,.04,'square',.25);tone(700,.04,'square',.2,.25);tone(900,.04,'square',.25,.6)}
+function steps(){for(let i=0;i<4;i++)tone(60,.25,'sine',.5,i*.9)}
+let bpm=70; function beat(){ if(caught)return; tone(55,.12,'sine',.5); tone(50,.1,'sine',.35,.18);
+  bpm=60+arousal*70; setTimeout(beat,60000/bpm) }
+function newCue(now){ cue=Math.random()<.5?'silence':'still'; cueEnd=now+5500; (cue==='silence'?tap:steps)(); }
+function loop(now){
+  // sensors
+  if(an){ an.getFloatTimeDomainData(buf); let s=0; for(const x of buf)s+=x*x; mic=Math.sqrt(s/buf.length);}
+  if(v.videoWidth){ sg.drawImage(v,0,0,64,48); const d=sg.getImageData(0,0,64,48).data;
+    if(prev){let m=0;for(let i=0;i<d.length;i+=4)m+=Math.abs(d[i+1]-prev[i+1]);motion=m/(d.length/4)} prev=Uint8ClampedArray.from(d)}
+  if(now-calT<3000){ noiseFloor=Math.max(noiseFloor,mic); baseMotion=Math.max(baseMotion,motion); }
+  else if(!caught){
+    const loud=mic>noiseFloor*2.5+.02, moved=motion>baseMotion*2+2;
+    arousal=Math.min(1,arousal*.995+(loud?.02:0)+(moved?.01:0)+(5-dist)*.0003);
+    if(cue){ const bad=(cue==='silence'&&loud)||(cue==='still'&&moved);
+      if(bad){dist-=.02; arousal=Math.min(1,arousal+.01)}
+      if(now>cueEnd){ if(!(bad)) dist=Math.min(5,dist+.4); cue=null; nextCue=now+7000+Math.random()*7000 } }
+    else if(now>nextCue) newCue(now);
+    dist-=.0004; // it always creeps a little
+    if(dist<=0){ caught=true; tone(40,2,'sawtooth',.8); tone(43,2,'sawtooth',.8); }
+  }
+  draw(now); dbg.textContent=`mic ${mic.toFixed(3)} floor ${noiseFloor.toFixed(3)}\nmotion ${motion.toFixed(1)} base ${baseMotion.toFixed(1)}\ncue ${cue}\ndist ${dist.toFixed(2)}\nbpm ${bpm.toFixed(0)}`;
+  requestAnimationFrame(loop);
+}
+function draw(now){
+  c.width=innerWidth; c.height=innerHeight; const W=c.width,H=c.height;
+  g.fillStyle='rgba(0,0,0,'+(.15+arousal*.35)+')'; g.fillRect(0,0,W,H);
+  if(caught){ g.fillStyle='#000'; g.fillRect(0,0,W,H); g.fillStyle='#a00'; g.font='40px monospace'; g.textAlign='center';
+    g.fillText('IT WAS BEHIND YOU.',W/2,H/2); g.font='16px monospace'; g.fillStyle='#777'; g.fillText('Tap or press R to retry',W/2,H/2+40);
+    return; }
+  // figure in the background, grows as it gets closer
+  const k=1-dist/5, h=H*(.25+k*.7), x=W*.7+Math.sin(now/3000)*8*(1-k), y=H*.95;
+  g.globalAlpha=.25+k*.6; g.fillStyle='#000'; g.beginPath(); g.ellipse(x,y-h*.85,h*.07,h*.09,0,0,7); g.fill();
+  g.fillRect(x-h*.09,y-h*.78,h*.18,h*.5); g.fillRect(x-h*.07,y-h*.3,h*.14,h*.3); g.globalAlpha=1;
+  if(k>.6){ g.fillStyle='#fff'; g.fillRect(x-h*.035,y-h*.88,h*.015,h*.012); g.fillRect(x+h*.02,y-h*.88,h*.015,h*.012); }
+}
+</script></body></html>

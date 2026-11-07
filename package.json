@@ -1,0 +1,21 @@
+{
+  "name": "superhorror-test",
+  "version": "0.1.0",
+  "description": "Superhorror prototype",
+  "main": "main.js",
+  "author": "you",
+  "scripts": {
+    "start": "electron . --no-sandbox",
+    "dist": "electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.example.superhorrortest",
+    "productName": "SuperhorrorTest",
+    "files": ["main.js", "index.html"],
+    "linux": { "target": "AppImage", "category": "Game" }
+  }
+}
